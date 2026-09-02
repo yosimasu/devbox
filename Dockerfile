@@ -1,8 +1,13 @@
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
-# --- mise：裝到系統路徑，任何 user 都能呼叫 ---
+# mise 版本：單一版本來源。本機與 CI build 都吃這個預設值，
+# CI 另會把它讀出來當 image 的版本 tag（image 版本 == mise 版本）。
+# 升版只改這一行。
+ARG MISE_VERSION=v2026.9.0
+
+# --- mise：裝到系統路徑（pin 版本、可重現），任何 user 都能呼叫 ---
 USER root
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+RUN curl -fsSL https://mise.run | MISE_VERSION=${MISE_VERSION} MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
 # --- 切回 devcontainer 預設非 root user ---
 USER vscode
@@ -23,5 +28,6 @@ RUN curl -fsSL --retry 5 --retry-all-errors \
  && bash /tmp/claude-install.sh \
  && rm -f /tmp/claude-install.sh
 
-# 冒煙測試，build 期就抓錯
-RUN mise --version && claude --version
+# 冒煙測試：確認可用，並斷言 mise 實際版本吻合 pin（防止漂移）
+RUN mise --version && claude --version \
+ && mise --version | grep -q "^${MISE_VERSION#v} "
