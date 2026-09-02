@@ -4,18 +4,26 @@
 下游專案 `FROM` 它，再用 mise 依 `mise.toml` 預裝 node / python 等 runtime。
 
 ```
-ghcr.io/yosimasu/devbox:latest   # 多架構：linux/amd64 + linux/arm64
+ghcr.io/yosimasu/devbox:latest       # 多架構：linux/amd64 + linux/arm64
+ghcr.io/yosimasu/devbox:2026.9.0     # 版本 tag == 裡面 mise 的版本
 ```
 
 ## 設計
 
 | 元件 | 怎麼裝 | 為什麼 |
 |------|--------|--------|
-| **mise** | 系統層 `/usr/local/bin/mise`，**shims 模式** | shims dir 掛在 `PATH`，讓 build 期的 `RUN` 與非互動 shell 都能用 mise 裝的工具；互動 shell 另用 `mise activate` |
+| **mise** | 系統層 `/usr/local/bin/mise`，**pin 版本**、**shims 模式** | 版本鎖定 → build 可重現；shims dir 掛在 `PATH`，讓 build 期的 `RUN` 與非互動 shell 都能用 mise 裝的工具；互動 shell 另用 `mise activate` |
 | **Claude Code** | 官方 native installer，裝在 `~/.local/bin` | **不依賴 node**，語言版本完全交給下游用 mise 決定 |
 | base OS | `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` | 內建非 root 的 `vscode` user、sudo、常用工具 |
 
 Claude 的登入憑證**刻意不烤進 image**（屬個人資料）。容器內第一次跑 `claude` 時登入，或帶 `ANTHROPIC_API_KEY`。
+
+## 版本策略
+
+- **mise 版本 pin 在 `Dockerfile` 的 `ARG MISE_VERSION`**（單一版本來源）。本機與 CI build 都吃這個預設值，build 可重現。冒煙測試會斷言實際裝到的版本吻合 pin。
+- **image 版本 tag 直接對齊 mise 版本**：CI 從 `Dockerfile` 讀出 pin，打成 `:<mise 版本>`（例：`:2026.9.0`）+ `:latest` + `:sha-xxxxxxx`。所以 image 版本一看就知道裡面 mise 是哪版。
+- **升版 mise**：改 `Dockerfile` 裡 `ARG MISE_VERSION=vX.Y.Z` 這一行 → push 到 `main` → CI 自動 build 並打上新版本 tag。
+- 每週定期 build 會跟上 **base OS / Claude Code** 的更新；**mise 維持 pin**，不會自己跳版。
 
 ## 下游怎麼用
 
@@ -38,7 +46,7 @@ python = "3.12"
 
 ```dockerfile
 # .devcontainer/Dockerfile
-FROM ghcr.io/yosimasu/devbox:latest
+FROM ghcr.io/yosimasu/devbox:latest    # 想鎖版就用 :2026.9.0
 COPY mise.toml .
 RUN mise trust && mise install
 ```
@@ -67,7 +75,7 @@ docker run --rm devbox:local bash -lc 'mise --version && claude --version'
 
 ## CI / 發布
 
-`.github/workflows/build-base.yml`：push 到 `main` 且改到 `Dockerfile` 時自動 build & push，另有 `workflow_dispatch`（手動）與每週定期重 build（跟上 base OS / mise / claude 更新）。
+`.github/workflows/build-base.yml`：push 到 `main` 且改到 `Dockerfile` 時自動 build & push，另有 `workflow_dispatch`（手動）與每週定期重 build。
 
 **各架構在原生 runner build**（amd64 → `ubuntu-latest`、arm64 → `ubuntu-24.04-arm`），push by digest，再 `docker buildx imagetools create` 合成多架構 manifest。用內建 `GITHUB_TOKEN` 推 GHCR，不需要自己的 PAT。arm64 原生 runner 靠 repo 為 **public** 而免費。
 
@@ -93,7 +101,7 @@ docker buildx imagetools inspect ghcr.io/yosimasu/devbox:latest
 
 ```
 .
-├── Dockerfile                          # base image（mise + Claude Code）
+├── Dockerfile                          # base image（mise pin + Claude Code）
 ├── .github/workflows/build-base.yml    # 多架構 build & push 到 GHCR
 └── example/                            # 下游用法範例
     ├── mise.toml
