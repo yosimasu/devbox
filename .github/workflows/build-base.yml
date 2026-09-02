@@ -8,7 +8,7 @@ on:
       - .github/workflows/build-base.yml
     tags:
       - "v*"
-  workflow_dispatch: {}   # 允許手動觸發
+  workflow_dispatch: {}
   schedule:
     - cron: "0 18 * * 1"  # 週二清晨 02:00 (UTC+8) 定期重 build，跟上 base OS/mise/claude 更新
 
@@ -16,15 +16,25 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/devbox
 
 jobs:
+  # 每個架構在「原生 runner」上 build（避免 QEMU 模擬 → 繞開 Bun/AVX 問題），
+  # push by digest 不打 tag，最後由 merge job 合成 manifest。
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-      packages: write   # 推 GHCR 需要
+      packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: docker/setup-qemu-action@v3   # 讓 runner 能 build arm64
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -32,9 +42,58 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}   # 內建 token，不用自己的 PAT
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute tags
+      - name: Docker meta (labels only)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+
+      - name: Build & push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # 收集各架構的 digest，合成多架構 manifest 並打上正式 tag。
+  merge:
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta (tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -44,14 +103,19 @@ jobs:
             type=ref,event=tag
             type=sha,format=short
 
-      - name: Build & push
-        uses: docker/build-push-action@v6
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list & push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:latest

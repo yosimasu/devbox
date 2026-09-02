@@ -16,7 +16,12 @@ RUN echo 'eval "$(mise activate bash)"' >> ~/.bashrc \
  && echo 'eval "$(mise activate zsh)"'  >> ~/.zshrc
 
 # --- Claude Code：native installer，不依賴 node ---
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# 下載到檔案再執行（避免 curl|bash 吞掉 curl 的錯誤），帶 UA + retry 盡量繞過 CDN 對 CI IP 的擋
+RUN curl -fsSL --retry 5 --retry-all-errors \
+      -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36" \
+      https://claude.ai/install.sh -o /tmp/claude-install.sh \
+ && bash /tmp/claude-install.sh \
+ && rm -f /tmp/claude-install.sh
 
 # 冒煙測試，build 期就抓錯
 RUN mise --version && claude --version
