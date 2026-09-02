@@ -1,0 +1,5 @@
+# 這個專案要的 runtime／工具，跟 code 一起版控
+# 下游 image build 時 `mise install` 會照這裡裝
+[tools]
+node = "20"
+python = "3.12"
